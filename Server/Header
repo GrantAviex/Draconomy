@@ -1,0 +1,66 @@
+
+//Server.h
+//Created May 2015
+#ifndef SERVER_H
+#define SERVER_H
+#include "Events.h"
+#include <string.h>
+#include "NetworkingStruct.h"
+#include <vector>
+#include "RakNetTypes.h" 
+#include <RakString.h>
+#include <map>
+#include <utility>
+class CGameObject;
+class CObjectManager;
+class CEventSystem;
+class CServer
+{
+public:
+	CServer();
+	~CServer();
+	void Initialize(NetworkingStruct info);
+	void Update();
+	void Shutdown();
+	void SendCreationRunTime(CObjectManager* _objMan);
+	void SendCreation(CObjectManager* _objMan, RakNet::SystemAddress address);
+	void SendSnapshot(CObjectManager* _objMan);
+	void SendLobbystatus();
+	void SendPlayerInformation(unsigned int _id, bool fireable);
+	void SendLobbyInfo();
+	void HandleEventMessage(EventID eventInc, TEventData data);
+	int  ClientsConnected() { return addresses.size(); }
+	bool Contains(CGameObject* container, CGameObject* obj);
+	CEventSystem* GetEventSystem() { return eventSystem; }
+	void SendEventMessage(EventID _id, TEventData data);
+	void SendPlayerEventMessage(EventID _id, TEventData data, unsigned int pId);
+	unsigned char GetPlayerLoadout(int id);
+	void GetReadiedPlayers();
+	void SendEventToAllPlayers(EventID _id, TEventData data);
+	CGameObject* GetPlayerByID(int id);
+	std::vector<int> GetPlayerIDs();
+	std::map<int, CGameObject*>* GetPlayersMap()		{ return &players; }
+	std::string * GetPlayerNameByID(int id)				{ return &PlayerNamesByID[id]; }
+	bool PlayerDisconnected(unsigned int pId);
+	void AllowConnections();
+private:
+	char data[256];
+	int length;
+	std::vector <int> disconnectedPlayers;
+	CEventSystem* eventSystem;
+	std::map<int, CEventSystem*> playerEventSystem;
+	std::map<int, CGameObject*> players;
+	RakNet::RakPeerInterface *m_rpiPeer;
+	RakNet::Packet *m_pPacket;
+	std::string hostName;
+	bool gameplayStarted;
+	std::vector<std::pair<RakNet::SystemAddress,bool>> addresses;
+	std::vector<RakNet::SystemAddress > addOrder;
+	std::vector<bool> ReadyPlayers;
+	std::vector<unsigned char> LoadOuts;
+	std::vector<RakNet::RakString> PlayerNames;
+	std::map<int, std::string> PlayerNamesByID;
+	short playerData;
+};
+
+#endif
