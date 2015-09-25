@@ -1,0 +1,293 @@
+
+//ObjectManager.cpp
+//Created May 2015
+
+#include "GameObject.h"
+#include "ObjectManager.h"
+#include "Game.h"
+#include "EventSystem.h"
+#include "Component.h"
+#ifdef IARESERVER
+#include "Manager.h"
+#include "XTime.h"
+#include "CapsuleCollider.h"
+#include "CollisionManager.h"
+#include "PlayerMovementController.h"
+#endif
+
+CObjectManager::CObjectManager()
+{
+	m_uIDCounter = 0;
+	m_pAssetManager = nullptr;
+}
+
+CObjectManager::~CObjectManager()
+{
+	for (auto& obj : m_mObjects)
+	{
+		if (obj.second)
+		{
+			delete obj.second;
+			obj.second = nullptr;
+		}
+	}
+	m_mObjects.clear();
+}
+
+vector<TNewObject> CObjectManager::GetOtherObjects(CGameObject* currPlayer)
+{
+	vector<TNewObject> sceneList;
+#ifdef IARESERVER
+	for (unsigned int i = 1; i < m_uIDCounter; i++)
+	{
+		CGameObject* other = m_mObjects[i];
+		if (other->GetName() == "Player")
+		{
+			if (other == currPlayer)
+			{
+				TNewObject nObj;
+				nObj.m_prefabName = other->GetName();
+				nObj.m_transform = other->GetMatrix();
+				nObj.m_iListIndex = other->GetID();
+				sceneList.push_back(nObj);
+			}
+			else
+			{
+				TNewObject nObj;
+				nObj.m_prefabName = "Dummy";
+				nObj.m_transform = other->GetMatrix();
+				nObj.m_iListIndex = other->GetID();
+				sceneList.push_back(nObj);
+			}
+		}
+		else if (other->GetName() != "Camera" && other->GetName() != "CameraPitch")
+		{
+			TNewObject nObj;
+			nObj.m_prefabName = other->GetName();
+			nObj.m_transform = other->GetMatrix();
+			nObj.m_iListIndex = other->GetID();
+			sceneList.push_back(nObj);
+		}
+	}
+
+#endif
+	return sceneList;
+}
+void CObjectManager::Reset()
+{
+	for (unsigned int i = 1; i <= m_mObjects.size(); i++)
+	{
+		if (m_mObjects[i])
+		{
+			m_mObjects[i]->SetActive(false);
+		}
+	}
+}
+vector<CGameObject*> CObjectManager::GetAllEnemies()
+{
+	vector <CGameObject*> enemList;
+	for (auto& spider : m_mObjectPools["Spider"])
+	{
+		enemList.push_back(spider);
+	}
+	for (auto& ant : m_mObjectPools["EnemyGoblin"])
+	{
+		enemList.push_back(ant);
+	}
+	for (auto& assassin : m_mObjectPools["EnemyAssassin"])
+	{
+		enemList.push_back(assassin);
+	}
+	for (auto& ogre : m_mObjectPools["EnemyOgre"])
+	{
+		enemList.push_back(ogre);
+	}
+	for (auto& bomber : m_mObjectPools["EnemyBomber"])
+	{
+		enemList.push_back(bomber);
+	}
+	for (auto& mage : m_mObjectPools["EnemyMage"])
+	{
+		enemList.push_back(mage);
+	}
+	for (auto& vanguard : m_mObjectPools["EnemyVanguard"])
+	{
+		enemList.push_back(vanguard);
+	}
+	return enemList;
+}
+
+CGameObject* CObjectManager::GetObjectByID(unsigned int _ID)
+{
+	if (m_mObjects.count(_ID))
+	{
+		return m_mObjects[_ID];
+	}
+	else
+		return nullptr;
+}
+void CObjectManager::CopyPrefab(CGameObject* prefab, CGameObject* object)
+{
+	object->CopyTransform(prefab);
+	for (auto& prefabChild : prefab->GetChildren())
+	{
+		for (auto& myChild : object->GetChildren())
+		{
+			if (prefabChild->GetName() == myChild->GetName())
+			{
+				CopyPrefab(prefabChild, myChild);
+			}
+		}
+	}
+}
+CGameObject* CObjectManager::CreateObject(string prefab, XMFLOAT4X4 transform, CEventSystem* eventSys)
+{
+	CGameObject* object = nullptr;
+
+	//Find inactive object in pool.
+	auto& pool = m_mObjectPools[prefab];
+	for (CGameObject* obj : pool)
+	{
+		if (obj->GetActive() == false)
+		{
+			object = obj;
+			break;
+		}
+	}
+
+	if (object != nullptr)
+	{
+		//Found an inactive object. Initialize it.
+		object->SetEventSystem(eventSys);
+		object->SetActive(true);
+
+		CopyPrefab(m_pAssetManager->GetPrefab(object->GetName()), object);
+		object->SetMatrix(&(XMLoadFloat4x4(&transform) * XMLoadFloat4x4(&object->GetMatrix())));
+	}
+	else
+	{
+		//Pool had no inactive objects. Create new object.
+		unsigned int id = GetNewUniqueID();
+
+		object = new CGameObject(id, m_pAssetManager->GetPrefab(prefab), this, eventSys, true);
+		m_mObjects[id] = object;
+		XMMATRIX m = (object->GetWorldMatrix()* XMLoadFloat4x4(&transform));
+		object->SetMatrix(&m);
+
+		TNewObject newObject;
+		newObject.m_prefabName = prefab;
+		newObject.m_iListIndex = id;
+		XMStoreFloat4x4(&newObject.m_transform, m);
+		m_nNewObjs.push_back(newObject);
+		m_nSceneList.push_back(newObject);
+		object->SetActive(false);
+		object->SetActive(true);
+
+		m_mObjectPools[prefab].push_back(object);
+	}
+
+	return object;
+}
+
+CGameObject* CObjectManager::GenerateObject(string prefab, XMFLOAT4X4 transform, int index)
+{
+#ifndef IARESERVER
+	CGameObject* object = nullptr;
+	auto& pool = m_mObjectPools[prefab];
+	for (CGameObject* obj : pool)
+	{
+		if (obj->GetActive() == false)
+		{
+			object = obj;
+			break;
+		}
+	}
+	if (object != nullptr)
+	{
+		//Found an inactive object. Initialize it.
+		object->SetEventSystem(CGame::GetInstance()->GetEventSystem());
+		object->SetActive(true);
+
+		object->CopyTransform(m_pAssetManager->GetPrefab(object->GetName()));
+		object->SetMatrix(&(XMLoadFloat4x4(&transform) * XMLoadFloat4x4(&object->GetMatrix())));
+	}
+	else
+	{
+		object = new CGameObject(index, m_pAssetManager->GetPrefab(prefab), this,CGame::GetInstance()->GetEventSystem(), false);
+		if (m_mObjects.count(index))
+			printf("Object at this Index already exists\n");
+		m_mObjects[index] = object;
+		XMMATRIX m = (object->GetWorldMatrix()* XMLoadFloat4x4(&transform));
+		object->SetMatrix(&m);
+		object->SetActive(true);
+
+		m_mObjectPools[prefab].push_back(object);
+	}
+	return object;
+#endif
+	return nullptr;
+}
+void CObjectManager::FillInPlayerInfo(CGameObject* player, string prefab)
+{
+	CGameObject* cloneFrom = m_pAssetManager->GetPrefab(prefab);
+	for (auto& comp : cloneFrom->GetAllComponents())
+	{
+		CComponent* nComp = comp->clone();
+		nComp->SetOwner(player);
+		player->AddComponent(nComp);
+	}
+	player->SetActive(false);
+	player->SetActive(true);
+
+	player->SetName(cloneFrom->GetName());
+#ifdef IARESERVER
+
+	CGameObject* modelFollower = nullptr;
+	string modelPrefab = prefab;
+	modelPrefab += "Model";
+	modelFollower = CreateObject(modelPrefab, player->GetMatrix(), player->GetEventSystem());
+	modelFollower->SetFollower(player);
+	((CPlayerMovementController*)player->GetComponent("PlayerMovementController"))->anim = (CAnimationController*)modelFollower->GetComponent("AnimationController");
+//	((CCapsuleCollider*)player->GetComponent("CapsuleCollider"))->eCapsuleType = CapsuleType::eCapPlayer;
+#endif
+}
+
+void CObjectManager::ObjectChanged(CGameObject* _object, int _index)
+{
+	TChangedObject objChanged;
+	objChanged.m_iListIndex = _index;
+	objChanged.m_pGameObject = _object;
+	m_lChangeList.push_back(objChanged);
+}
+
+void CObjectManager::UpdateObjects()
+{
+#ifdef IARESERVER
+	for (auto& i : m_mObjects)
+	{
+		if (i.second->GetActive() == true)
+		{
+			i.second->Update(CManager::GetInstance()->GetDelta());
+		}
+	}
+#endif
+}
+
+void CObjectManager::AllocateObjects(string prefab, unsigned int count)
+{
+	vector<CGameObject*> newObjects;
+	newObjects.reserve(count);
+
+	XMFLOAT4X4 transform;
+	memset(&transform, 0, sizeof(XMFLOAT4X4));
+	for (size_t i = 0; i < count; i++)
+	{
+		CGameObject* obj = CreateObject(prefab, transform, nullptr);
+		newObjects.push_back(obj);
+	}
+
+	for (auto& obj : newObjects)
+	{
+		obj->SetActive(false);
+	}
+}
