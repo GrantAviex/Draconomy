@@ -1,0 +1,700 @@
+#include "Server.h"
+#include "RakPeerInterface.h"
+#include "BitStream.h"
+using namespace RakNet;
+
+#include "ObjectManager.h"
+#include "Manager.h"
+#include "ManagerplayState.h"
+#include "ManagerLobbyState.h"
+#include "GameObject.h"
+#include "EventSystem.h"
+
+#include "SphereCollider.h"
+CServer::CServer()
+{
+	for (size_t i = 0; i < 8; i++)
+	{
+		ReadyPlayers.push_back(false);
+		LoadOuts.push_back(0);
+		PlayerNames.push_back("");
+	}
+	gameplayStarted = false;
+}
+
+
+CServer::~CServer()
+{
+}
+
+void CServer::Initialize(NetworkingStruct info)
+{
+	m_rpiPeer = RakNet::RakPeerInterface::GetInstance();
+	SocketDescriptor sd(info.port, 0);
+	m_rpiPeer->Startup(4, &sd, 1);
+	m_rpiPeer->SetMaximumIncomingConnections(0);
+	length = 4;
+	data[0] = (unsigned char)addresses.size();
+	data[1] = CManager::GetInstance()->GetGameSettings().maxPlayers;
+	data[2] = 0;
+	data[3] = 0;
+	m_rpiPeer->SetOfflinePingResponse(data, length);
+	eventSystem = new CEventSystem();
+	gameplayStarted = false;
+
+}
+void CServer::AllowConnections()
+{
+	m_rpiPeer->SetMaximumIncomingConnections(8);
+}
+void CServer::Update()
+{
+	for (size_t i = 0; i < disconnectedPlayers.size(); i++)
+	{
+		CGameObject* player = CManagerplayState::GetInstance()->GetObjectManager()->GetObjectByID(disconnectedPlayers[i]);
+		if (player->GetActive())
+		{
+			player->SetActive(false);
+		}
+	}
+	for (m_pPacket = m_rpiPeer->Receive(); m_pPacket; m_rpiPeer->DeallocatePacket(m_pPacket), m_pPacket = m_rpiPeer->Receive())
+	{
+		switch (m_pPacket->data[0])
+		{
+			case ID_REMOTE_DISCONNECTION_NOTIFICATION:
+				printf("Another client has disconnected.\n");
+				break;
+			case ID_REMOTE_CONNECTION_LOST:
+				printf("Another client has lost the connection.\n");
+				break;
+			case ID_REMOTE_NEW_INCOMING_CONNECTION:
+				printf("Another client has connected.\n");
+				break;
+			case ID_CONNECTION_REQUEST_ACCEPTED:
+			{
+				printf("Our connection request has been accepted.\n");
+				break;
+			}
+			case ID_NEW_INCOMING_CONNECTION:
+			{
+				printf("A connection is incoming.\n");
+				addresses.push_back(std::pair<RakNet::SystemAddress, bool>(m_pPacket->systemAddress, false));
+				SendCreation(CManagerplayState::GetInstance()->GetObjectManager(), m_pPacket->systemAddress);
+				data[0] = (char)addresses.size();
+				data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+				data[2] = 0;
+				data[3] = (char)hostName.size();
+				printf(to_string(hostName.size()).c_str());
+				for (size_t i = 0; i < hostName.size(); i++)
+				{
+					data[i + 4] = hostName[i];
+				}
+				length = 4 + hostName.length();
+				m_rpiPeer->SetOfflinePingResponse(data, length);
+				RakNet::TimeMS time;
+				time = 300000;
+				m_rpiPeer->SetTimeoutTime(time, m_pPacket->systemAddress);
+
+				break;
+			}
+			case ID_GAME_CREATION_RECEIVED:
+			{
+				RakNet::BitStream bsIn(m_pPacket->data, m_pPacket->length, false);
+				bsIn.IgnoreBytes(sizeof(RakNet::MessageID));
+				RakNet::RakString playerName;
+				bsIn.Read(playerName);
+
+				RakNet::BitStream bsOut;
+				bsOut.Write((RakNet::MessageID)ID_GAME_REGISTER_CAMERA);
+				unsigned int playerId = (unsigned int)players[m_pPacket->systemAddress.systemIndex]->GetID();
+				bsOut.Write(playerId);
+				m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, m_pPacket->systemAddress, false);
+				int i = 0;
+				for (auto& ref : addresses)
+				{
+					if (RakNet::SystemAddress::ToInteger(ref.first) == RakNet::SystemAddress::ToInteger(m_pPacket->systemAddress))
+					{
+						LoadOuts[i] = 1;
+						PlayerNames[i] = playerName;
+						break;
+					}
+					i++;
+				}
+				//LoadOuts[m_pPacket->systemAddress.systemIndex] = 1;
+				PlayerNamesByID[playerId] = playerName;
+				break;
+			}
+			case ID_NO_FREE_INCOMING_CONNECTIONS:
+				printf("The CServer is full.\n");
+				break;
+			case ID_DISCONNECTION_NOTIFICATION:
+			{
+				printf("We have been disconnected.\n");
+				auto iter = addresses.begin();
+				int i = 0;
+				for (auto& add : addresses)
+				{
+					if (add.first == m_pPacket->systemAddress)
+					{
+						disconnectedPlayers.push_back(players[add.first.systemIndex]->GetID());
+						players[add.first.systemIndex]->SetActive(false);
+						LoadOuts[i] = 0;
+						PlayerNames[i] = "";
+						for (size_t j = i; j < 7; j++)
+						{
+							LoadOuts[j] = LoadOuts[j + 1];
+							PlayerNames[j] = PlayerNames[j + 1];
+						}
+						addresses.erase(iter);
+						if (addresses.size() == 0)
+							CManager::GetInstance()->GameOver();
+						break;
+					}
+					iter++;
+					i++;
+				}
+				data[0] = (char)addresses.size();
+				data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+				data[2] = 0;
+				data[3] = (char)hostName.size();
+				printf(to_string(hostName.size()).c_str());
+				for (size_t i = 0; i < hostName.size(); i++)
+				{
+					data[i + 4] = hostName[i];
+				}
+				length = 4 + hostName.length();
+				m_rpiPeer->SetOfflinePingResponse(data, length);
+				break;
+			}
+			case ID_CONNECTION_LOST:
+			{
+				printf("Connection lost.\n");
+				auto iter = addresses.begin();
+				int i = 0;
+				for (auto& add : addresses)
+				{
+					if (add.first == m_pPacket->systemAddress)
+					{
+						disconnectedPlayers.push_back(players[add.first.systemIndex]->GetID());
+						players[add.first.systemIndex]->SetActive(false);
+						LoadOuts[i] = 0;
+						PlayerNames[i] = "";
+						for (size_t j = i; j < 7; j++)
+						{
+							LoadOuts[j] = LoadOuts[j + 1];
+							PlayerNames[j] = PlayerNames[j + 1];
+						}
+						addresses.erase(iter);
+						if (addresses.size() == 0)
+							CManager::GetInstance()->GameOver();
+						break;
+					}
+					iter++;
+					i++;
+				}
+				data[0] = (char)addresses.size();
+				data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+				data[2] = 0;
+				data[3] = (char)hostName.size();
+				printf(to_string(hostName.size()).c_str());
+				for (size_t i = 0; i < hostName.size(); i++)
+				{
+					data[i + 4] = hostName[i];
+				}
+				length = 4 + hostName.length();
+				m_rpiPeer->SetOfflinePingResponse(data, length);
+				break;
+			}
+			case ID_GAME_CLIENTQUIT:
+			{
+				auto iter = addresses.begin();
+				int i = 0;
+				for (auto& add : addresses)
+				{
+					if (add.first == m_pPacket->systemAddress)
+					{
+						players[add.first.systemIndex]->SetActive(false);
+						LoadOuts[i] = 0;
+						PlayerNames[i] = "";
+						for (size_t j = i; j < 7; j++)
+						{
+							LoadOuts[j] = LoadOuts[j + 1];
+							PlayerNames[j] = PlayerNames[j + 1];
+						}
+						addresses.erase(iter);
+						if (addresses.size() == 0)
+							CManager::GetInstance()->GameOver();
+						break;
+					}
+					iter++;
+					i++;
+				}
+				data[0] = (char)addresses.size();
+				data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+				data[2] = 0;
+				data[3] = (char)hostName.size();
+				printf(to_string(hostName.size()).c_str());
+				for (size_t i = 0; i < hostName.size(); i++)
+				{
+					data[i + 4] = hostName[i];
+				}
+				length = 4 + hostName.length();
+				m_rpiPeer->SetOfflinePingResponse(data, length);
+				break;
+			}
+			case ID_GAME_MESSAGE_EVENT:
+			{
+				EventID eventInc;
+				RakNet::BitStream bsIn(m_pPacket->data, m_pPacket->length, false);
+				bsIn.IgnoreBytes(sizeof(RakNet::MessageID));
+				bsIn.Read(eventInc);
+
+				TEventData data;
+				RakString s;
+				bsIn.Read(data.i);
+				bsIn.Read(data.m);
+				bsIn.Read(s);
+				data.s = s;
+				if (eventInc == EventID::SkipBuildPhase)
+				{
+					GetEventSystem()->SendEventImmediate(eventInc, &data);
+				}
+				else if(eventInc == EventID::UpdateBuildPhaseTimer)
+				{
+					GetEventSystem()->SendEventImmediate(eventInc, &data);
+				}
+				else if (eventInc == EventID::SocketGem)
+				{
+					GetEventSystem()->SendEventImmediate(eventInc, &data);
+				}
+				else if (eventInc == EventID::GameStarted)
+				{
+					GetEventSystem()->SendEventImmediate(eventInc, &data);
+				}
+				else if (eventInc == EventID::DropMana)
+				{
+					playerEventSystem[m_pPacket->systemAddress.systemIndex]->SendEventImmediate(eventInc, &data);
+				}
+				else
+					playerEventSystem[m_pPacket->systemAddress.systemIndex]->SendEventImmediate(eventInc, &data);
+				//HandleEventMessage(eventInc, data);
+				break;
+			}
+			case ID_LOBBY_READY:
+			{
+				for (size_t i = 0; i < addresses.size(); i++)
+				{
+					if (RakNet::SystemAddress::ToInteger(addresses[i].first) == RakNet::SystemAddress::ToInteger(m_pPacket->systemAddress))
+						addresses[i].second = !addresses[i].second;
+				}
+				int readyPlayersCount = 0;
+				for (auto& add : addresses)
+				{
+					if (add.second)
+					{
+						readyPlayersCount++;
+						TEventData data;
+						data.s = "ReadyUp";
+						data.i = 0;
+						SendEventMessage(EventID::PlaySoundOnClient, data);
+					}
+				}
+				if (readyPlayersCount == addresses.size())
+				{
+					TEventData data2;
+					data2.s = "PlayerJoin";
+					data2.i = 0;
+					SendEventMessage(EventID::PlaySoundOnClient, data2);
+					gameplayStarted = true;
+					data[0] = (char)addresses.size();
+					data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+					data[2] = 1;
+					data[3] = (char)hostName.size();
+					printf(to_string(hostName.size()).c_str());
+					for (size_t i = 0; i < hostName.size(); i++)
+					{
+						data[i + 4] = hostName[i];
+					}
+					length = 4 + hostName.length();
+					m_rpiPeer->SetOfflinePingResponse(data, length);
+					for (size_t i = 0; i < players.size(); i++)
+					{
+						if (LoadOuts[i] >0)
+						{
+							if (!players[i]->GetActive())
+							{
+								continue;
+							}
+								if (LoadOuts[i] == 1)
+								{
+									CObjectManager* objMan = players[i]->GetObjMan();
+									objMan->FillInPlayerInfo(players[i], "PlayerBlue");
+								}
+								else if (LoadOuts[i] == 2)
+								{
+									CObjectManager* objMan = players[i]->GetObjMan();
+									objMan->FillInPlayerInfo(players[i], "PlayerRed");
+								}
+								else if (LoadOuts[i] == 3)
+								{
+									CObjectManager* objMan = players[i]->GetObjMan();
+									objMan->FillInPlayerInfo(players[i], "PlayerGreen");
+								}
+								else if (LoadOuts[i] == 4)
+								{
+									CObjectManager* objMan = players[i]->GetObjMan();
+									objMan->FillInPlayerInfo(players[i], "PlayerGold");
+								}
+						}
+					}
+					CManager::GetInstance()->PlayersReady();
+					CManager::GetInstance()->AdjustBasedOnPlayers(addresses.size());
+					RakNet::BitStream bsOut;
+					bsOut.Write((RakNet::MessageID)ID_LOBBY_START);
+					bsOut.Write(players.size());
+					unsigned char loadOut = 0;
+					for (auto& player : players)
+					{
+						string prefabName = player.second->GetName();
+						bsOut.Write(player.second->GetID());
+						if (prefabName == "PlayerBlue")
+						{
+							loadOut = 1;
+							bsOut.Write(loadOut);
+						}
+						else if (prefabName == "PlayerRed")
+						{
+							loadOut = 2;
+							bsOut.Write(loadOut);
+						}
+						else if (prefabName == "PlayerGreen")
+						{
+							loadOut = 3;
+							bsOut.Write(loadOut);
+						}
+						else if (prefabName == "PlayerGold")
+						{
+							loadOut = 4;
+							bsOut.Write(loadOut);
+						}
+					}
+					m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+					break;
+				}
+				GetReadiedPlayers();
+				break;
+			}
+			case ID_LOBBY_SETTINGS:
+			{
+				RakNet::BitStream bsIn(m_pPacket->data, m_pPacket->length, false);
+				bsIn.IgnoreBytes(1);
+				unsigned char limit, mapInd;
+				unsigned int sWave, eWave;
+				unsigned char length;
+				bsIn.Read(length);
+				hostName.clear();
+				for (unsigned char i = 0; i < length; i++)
+				{
+					char letter;
+					bsIn.Read(letter);
+					hostName += letter;
+				}
+				bsIn.Read(mapInd);
+				bsIn.Read(limit);
+				bsIn.Read(sWave);
+				bsIn.Read(eWave);
+				//m_rpiPeer->SetMaximumIncomingConnections(limit);
+				CManager::GetInstance()->SetGameSettings(TGameData(sWave, eWave, limit, mapInd));
+				data[0] = (char)addresses.size();
+				data[1] = (char)CManager::GetInstance()->GetGameSettings().maxPlayers;
+				data[2] = 0;
+				data[3] = (char)hostName.size();
+				printf(to_string(hostName.size()).c_str());
+				for (size_t i = 0; i < hostName.size(); i++)
+				{
+					data[i + 4] = hostName[i];
+				}
+				length = 4 + hostName.length();
+				printf(to_string(hostName.size()).c_str());
+				printf("\n");
+				m_rpiPeer->SetOfflinePingResponse(data, length);
+				printf(to_string(length).c_str());
+				printf("\n");
+				break;
+			}
+			case ID_LOBBY_LOADOUT_CHANGE:
+			{
+				RakNet::BitStream bsIn(m_pPacket->data, m_pPacket->length, false);
+				bsIn.IgnoreBytes(1);
+				unsigned char inc = 0;
+				bsIn.Read(inc);
+
+				int i = 0;
+				for (auto& ref : addresses)
+				{
+					if (RakNet::SystemAddress::ToInteger(ref.first) == RakNet::SystemAddress::ToInteger(m_pPacket->systemAddress))
+					{
+						LoadOuts[i] = inc;
+						break;
+					}
+					i++;
+				}
+				break;
+			}
+			case ID_GAME_PLAYER_REVIVE:
+			{
+				RakNet::BitStream bsIn(m_pPacket->data, m_pPacket->length, false);
+				bsIn.IgnoreBytes(1);
+				unsigned int id = 0;
+				bsIn.Read(id);
+				players[0]->GetObjMan()->GetObjectByID(id)->SetActive(true);
+
+				TEventData tdata;
+				tdata.i = id;
+				tdata.m[0] = 0;
+				GetEventSystem()->SendEventImmediate(EventID::Revived,&tdata);
+		
+				break;
+			}
+			default:
+			{
+				unsigned char messxageID = m_pPacket->data[0];
+				printf("Message with identifier %i has arrived.\n", m_pPacket->data[0]);
+				break;
+			}
+		}
+	}
+
+	eventSystem->Dispatch();
+	for (auto& eventSys : playerEventSystem)
+	{
+		eventSys.second->Dispatch();
+	}
+}
+void CServer::HandleEventMessage(EventID eventInc, TEventData data)
+{
+	//CEventSystem::GetInstance()->SendEventImmediate(eventInc, &data);
+}
+void CServer::GetReadiedPlayers()
+{
+	int i = 0;
+	for (auto& ref : addresses)
+	{
+		ReadyPlayers[i] = ref.second;
+		i++;
+	}
+}
+void CServer::SendLobbyInfo()
+{
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_LOBBY_INFO);
+	unsigned char cTrue = 1;
+	unsigned char cFalse = 0;
+	unsigned char pCount = addresses.size();
+	bsOut.Write(pCount);
+	for (size_t i = 0; i < pCount; i++)
+	{
+		bsOut.Write(LoadOuts[i]);
+		if (ReadyPlayers[i])
+		{
+			bsOut.Write(cTrue);
+		}
+		else
+		{
+			bsOut.Write(cFalse);
+		}
+	}
+	unsigned char pNameCount = (unsigned char)(PlayerNames.size());
+	bsOut.Write(pNameCount);
+	for (size_t i = 0; i < pNameCount; i++)
+	{
+		bsOut.Write(PlayerNames[i]);
+	}
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+}
+void CServer::SendCreation(CObjectManager* _objMan, RakNet::SystemAddress _other)
+{
+	float randX = (float)(rand() % 1200 - 600);
+	float randZ = (float)(rand() % 1200 - 600);
+	XMMATRIX startPos = XMMatrixTranslation(randX, 1720, randZ);
+	XMFLOAT4X4 temp;
+	XMStoreFloat4x4(&temp, startPos);
+	CEventSystem* playerEvent = new CEventSystem();
+	playerEventSystem[_other.systemIndex] = playerEvent;
+	CGameObject* player = _objMan->CreateObject("Player", temp, playerEvent);
+	players[_other.systemIndex] = player;
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_MESSAGE_CREATION);
+	std::list<TNewObject> newList = _objMan->GetSceneList();
+	int objCount = newList.size();
+	if (objCount <= 0)
+		return;
+	bsOut.Write(objCount);
+	for (auto& ref : newList)
+	{
+		TNewObject temp = ref;
+		RakNet::RakString rString = temp.m_prefabName.c_str();
+		bsOut.Write(rString);
+		bsOut.Write(temp.m_transform);
+		bsOut.Write(temp.m_iListIndex);
+	}
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+	_objMan->NewListSent();
+
+}
+void CServer::SendCreationRunTime(CObjectManager* _objMan)
+{
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_MESSAGE_CREATION);
+	std::list<TNewObject> newList = _objMan->GetNewList();
+	int objCount = newList.size();
+	if (objCount <= 0)
+		return;
+	bsOut.Write(objCount);
+	auto beg = newList.begin();
+	auto end = newList.end();
+	for (auto i = beg; i != end; i++)
+	{
+		TNewObject temp = (*i);
+		RakNet::RakString rString = temp.m_prefabName.c_str();
+		bsOut.Write(rString);
+		bsOut.Write(temp.m_transform);
+		bsOut.Write(temp.m_iListIndex);
+	}
+	_objMan->NewListSent();
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+
+}
+bool CServer::Contains(CGameObject* container, CGameObject* obj)
+{
+	if (!container)
+		return false;
+	if (container == obj)
+		return true;
+	for (auto& child : container->GetChildren())
+	{
+		if (Contains(child, obj))
+			return true;
+	}
+	return false;
+}
+void CServer::SendSnapshot(CObjectManager* _objMan)
+{
+	std::list<TChangedObject> objList = _objMan->GetChangeList();
+	int objCount = objList.size();
+	_objMan->ChangeListSent();
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_MESSAGE_SNAPSHOT);
+	if (objCount > 0)
+	{
+		bsOut.Write(objCount);
+		for (auto& iter : objList)
+		{
+			TChangedObject temp = iter;
+			bsOut.Write(temp.m_iListIndex);
+			bsOut.Write(temp.m_pGameObject->GetMatrix());
+			bsOut.Write(temp.m_pGameObject->GetActive());
+		}
+	}
+	else
+		return;
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+
+}
+void CServer::SendEventMessage(EventID _id, TEventData data)
+{
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_MESSAGE_EVENT);
+	bsOut.Write(_id);
+	bsOut.Write(data.i);
+	bsOut.Write(data.m);
+	RakString s = data.s.c_str();
+	bsOut.Write(s);
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+}
+void CServer::SendPlayerEventMessage(EventID _id, TEventData data, unsigned int pId)
+{
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_PLAYER_MESSAGE_EVENT);
+	bsOut.Write(pId);
+	bsOut.Write(_id);
+	bsOut.Write(data.i);
+	bsOut.Write(data.m);
+	RakString s = data.s.c_str();
+	bsOut.Write(s);
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+}
+void CServer::SendPlayerInformation(unsigned int _id, bool fireable)
+{
+	RakNet::BitStream bsOut;
+	bsOut.Write((RakNet::MessageID)ID_GAME_PLAYER_INFO);
+	bsOut.Write(_id);
+	unsigned char fire = 0;
+	if (fireable)
+		fire = 1;
+	bsOut.Write(fire);
+	m_rpiPeer->Send(&bsOut, HIGH_PRIORITY, RELIABLE_ORDERED, 0, UNASSIGNED_RAKNET_GUID, true);
+}
+
+void CServer::SendLobbystatus()
+{
+
+}
+void CServer::Shutdown()
+{
+	RakNet::RakPeerInterface::DestroyInstance(m_rpiPeer);
+	m_rpiPeer = nullptr;
+	delete eventSystem;
+	for (auto& pSys : playerEventSystem)
+	{
+		delete pSys.second;
+	}
+}
+bool CServer::PlayerDisconnected(unsigned int pId)
+{
+	for (size_t i = 0; i < disconnectedPlayers.size(); i++)
+	{
+		if (pId == disconnectedPlayers[i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+CGameObject* CServer::GetPlayerByID(int id)
+{
+	return players[0]->GetObjMan()->GetObjectByID(id);
+}
+vector<int> CServer::GetPlayerIDs()
+{
+	vector<int> ids;
+	for (auto& evSys : playerEventSystem)
+	{
+		if (players[evSys.first]->GetActive())
+		{
+			ids.push_back(players[evSys.first]->GetID());
+		}
+	}
+	return ids;
+}
+unsigned char CServer::GetPlayerLoadout(int id)
+{
+	for (auto& player : players)
+	{
+		if (player.second->GetID() == id)
+		{
+			return LoadOuts[player.first];
+		}
+	}
+	return 0;
+}
+void CServer::SendEventToAllPlayers(EventID _id, TEventData data)
+{
+	for (auto& evSys: playerEventSystem)
+	{
+		if (players[evSys.first]->GetActive())
+		{
+			evSys.second->SendEventImmediate(_id, &data);
+		}
+	}
+}
